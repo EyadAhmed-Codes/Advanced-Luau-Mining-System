@@ -1,9 +1,10 @@
 --------------------------------------------| Notes |-------------------------------------------
---|         - This script intentionally avoids ModuleScripts to keep all related mining
+--|         > Core mining system scripted entirely by Eyad Ahmed (@eyado2122_1 on roblox)
+--|         > This script intentionally avoids ModuleScripts to keep all related mining 
 --|            logic auditable in one place (for application).
 --|         - Pickaxe name is expected to be "Iron Pickaxe", "Gold Pickaxe", etc..
 --|		    - Ore model name is expected to be "IronOre", "GoldOre", etc..
---|		    - Ore Drops must be a model and has 1 part/mesh named root.
+--|		    - Ore Drops must be a model and has 1 part/mesh named 'root'.
 --|		    - No animations are implemented here because a client script would be needed.
 ------------------------------------------------------------------------------------------------
 --// Services
@@ -84,6 +85,41 @@ local PickaxesData = {
 		,Tier = 2
 	}
 }
+-----------------------------
+------ Debug and info -------
+-----------------------------
+local LOG_LEVEL = {
+	Debug = true,  --// set false if in production
+	Info = true,
+	Security = true,
+	Warn = true,
+	Error = true,
+}
+
+--// Debug / Logging Utility
+local function Debug_Print(Level:"Debug" | "Info" | "Security" | "Warn" | "Error", Message:string, Context)
+	if not LOG_LEVEL[Level] then
+		return
+	end
+
+	local prefix = "[Mining]["..Level.."]"
+	local output = prefix .. " " .. tostring(Message)
+
+	if Context ~= nil and typeof(Context) == "table" then 
+		local Str = ""
+		for key, value in pairs(Context) do
+			Str ..= "\n      > "..tostring(key).." = "..tostring(value)
+		end
+		output ..= "\n Context: " .. tostring(Str) 
+	end
+	if Level == "Error" then                           
+		error(output)
+	elseif Level == "Warn" then 
+		warn(output)
+	else
+		print(output)
+	end
+end
 
 -----------------------------
 -------- Player Init --------
@@ -106,8 +142,7 @@ Players.PlayerAdded:Connect(function(player)
 			stat.Value = Data.DefaultValue
 			stat.Parent = leaderstats
 		else
-			warn("Please set a valid instance type for leaderstat value '"..(statName or "nill").."'!")
-			warn("Current instance type that is set: "..(Data.Type or "nil"))
+			Debug_Print("Warn","Please set a valid instance type for leaderstat value '"..(statName or "nil").."'!", {DataType = Data.Type or "nil"})
 			return
 		end
 	end
@@ -165,29 +200,28 @@ end
 -------- World Data ---------
 -----------------------------
 local World = {
-	SpawnSlots = {} --// List of spawn locations for ores
+	AvailableSlots = {} --// List of spawn available locations for ores  (dynamic)
+	,TakenSlots = {}    --// List of taken spawn locations for ores (dynamic)
 }
 --// Get A Random Spawn Location (For OreID)
 --// OreID: number
 function World:GetRandomSpawnSlot(OreID)
-	local validLocations = {}
-	for _, Slot in pairs(World.SpawnSlots) do -- Loop through all spawn locations
-		if not Slot.SpawnedOre then -- If the spawn location has no ore spawned
-			table.insert(validLocations, Slot) -- Add it to the valid locations
-		end
-	end
-
-	local ChosenSlot = validLocations[math.random(1, #validLocations)]
+	local Index = math.random(1, #World.AvailableSlots)
+	local ChosenSlot = World.AvailableSlots[Index]
 	if ChosenSlot then
 		ChosenSlot.SpawnedOre = OreID
+		table.insert(World.TakenSlots, ChosenSlot) --// Store the taken slot
+		table.remove(World.AvailableSlots, Index) --// Remove the slot from available slots
 	end
 	return ChosenSlot
 end
 
 function World:RemoveFromSlot(OreID) -- Spawn slot is freed to prevent dead slots after ore removal
-	for _, Slot in pairs(World.SpawnSlots) do
+	for Index, Slot in pairs(World.TakenSlots) do
 		if Slot.SpawnedOre == OreID then
 			Slot.SpawnedOre = nil
+			table.insert(World.AvailableSlots, Slot) --// Add the slot to available slots
+			table.remove(World.TakenSlots, Index) --// Remove the slot from taken slots
 			return
 		end
 	end
@@ -199,7 +233,7 @@ end
 --// Safely delete ore
 --// OreID: number
 --// Order: boolean. Default: false. (if true, it will delete the ore, if false, will check for TimeSinceLastMined.
---//  true should be used when you want to delete the ore, and false should be used for despawning logic)
+--// true should be used when you want to delete the ore, and false should be used for despawning logic)
 local function DeleteOre(OreID, Order:boolean)
 	local Ore = OreState.ByID[OreID]
 	if Ore then
@@ -254,8 +288,8 @@ local function Init()
 	end
 
 	--// Init OreSpawnLocations
-	for _, SpawnLocation in pairs(OreSpawnLocations) do
-		table.insert(World.SpawnSlots, {['SpawnLocation'] = SpawnLocation, SpawnedOre = nil})
+	for Index, SpawnLocation in pairs(OreSpawnLocations) do
+		table.insert(World.AvailableSlots, {['SpawnLocation'] = SpawnLocation, SpawnedOre = nil})
 	end
 	
 	--// Make Tools for ore
@@ -264,8 +298,8 @@ local function Init()
 		local OreTool = Instance.new("Tool")
 		local root = OreClone:FindFirstChild("root")
 		if not root then 
-			warn("Ore model " .. Ore.Name .. " is missing a 'root' part!")
-			warn("Ore Drop must be a model, has 1 part/mesh named root, and is not anchored.")
+			Debug_Print("Warn","Ore model " .. Ore.Name .. " is missing a 'root' part!")
+			Debug_Print("Warn","Ore Drop must be a model, has 1 part/mesh named 'root'")
 			continue
 		end
 		root.Name = "Handle"
@@ -281,16 +315,18 @@ local function Init()
 		OreTool.Parent = OresTools_Folder
 	end
 	
-	--// Hide Spawn loactions
+	--// Hide Spawn locations
 	for _, SpawnLocation in pairs(OreSpawnLocations) do
 		SpawnLocation.Transparency = 1
 		SpawnLocation.CanCollide = false
 	end
 end
-local Success, ErrorMsg = pcall(Init) --// pcall prevents partial initialization from crashing the server
+local Success, ErrorMsg = pcall(Init)
 if not Success then
-	warn("Error during initialization: " .. ErrorMsg)
+	Debug_Print("Error","Initialization Failed!", {ErrorMessage = ErrorMsg})
 end
+-----------------------------------------------------------------------------------------------
+
 --// Drop ores at the ore's position
 --// Player: Player that will own the ores
 --// Ore: Ore model
@@ -298,8 +334,7 @@ local function DropOres(Player:Player, Ore:Model)
 	local Data_ForOre = OreData[Ore.Name:split("Ore")[1]]
 	local OreDropTemplate = OreDropTemplates[Ore.Name]
 	if not OreDropTemplate then 
-		warn("No Ore Drop Template found in 'OreDropTemplate' folder")
-		warn("Consider adding a model for this ore")
+		Debug_Print("Warn","No Ore Drop Template found in 'OreDropTemplate' folder \nConsider adding a model for this ore", {OreName = Ore.Name})
 		return 
 	end
 	
@@ -328,10 +363,16 @@ local function DropOres(Player:Player, Ore:Model)
 			if DropOre_Clone:GetAttribute("PickedUp") then return end
 			if DropOre_Clone:GetAttribute("Owner") ~= Player.UserId then return end -- make sure player owns the ore
 
-			if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then return end
+			if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then
+				Debug_Print("Debug", "Player has no character or humanoid root part", {UserId = Player.UserId})
+				return 
+			end
 			-- Distance is rechecked server-side to prevent exploiters from triggering prompts remotely
 			local Distance = (Player.Character.HumanoidRootPart.Position - DropOre_Clone.root.Position).Magnitude
-			if Distance > Settings.MaxPickupDistance + 5 then return end
+			if Distance > Settings.MaxPickupDistance + 2 then
+				Debug_Print("Security", "Player is too far from prompt", {UserId = Player.UserId, DistanceFromOre = Distance})
+				return
+			end
 			DropOre_Clone:SetAttribute("PickedUp", true)
 			DropOre_Clone:Destroy()
 			local OreTool = OresTools_Folder:FindFirstChild(Ore.Name)
@@ -351,20 +392,30 @@ end
 local function MineOre(Player:Player, OreID:number, PickaxeData) 
 	local Ore:Model = OreState.ByID[OreID]
 	if not Ore then return end
-	if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then return end
+	if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then 
+		Debug_Print("Debug", "Player has no character or humanoid root part", {UserId = Player.UserId})
+		return 
+	end
 	-- Distance is rechecked server-side to prevent exploiters from triggering prompts remotely
 	local Distance = (Player.Character.HumanoidRootPart.Position - Ore.PrimaryPart.Position).Magnitude
-	if Distance > Settings.MaxDistanceToOre + 5 then return end
+	if Distance > Settings.MaxDistanceToOre + 2 then
+		Debug_Print("Security", "Player is too far from prompt", {UserId = Player.UserId, DistanceFromOre = Distance})
+		return 
+	end
 	local Health = Ore:GetAttribute("OreHealth")
+	local MaxHealth = Ore:GetAttribute("OreMaxHealth")
 	local NewHealth = math.max(0, Health - PickaxeData.Damage)
 	if NewHealth == 0 then
 		if Player:FindFirstChild("leaderstats") and Player.leaderstats:FindFirstChild("Cash") then --Make sure leaderstats and cash exists
 			Player.leaderstats.Cash.Value += OreData[Ore.Name:split("Ore")[1]].CashReward
 			DropOres(Player, Ore)
 		else
-			warn("Please make sure players has a 'Cash' int value in leaderstats!")
+			Debug_Print("Warn","Please make sure players has a 'Cash' of type: IntValue in leaderstats!")
 		end
 		DeleteOre(OreID, true)
+		return
+	else
+		Ore.Root:FindFirstChild("ProximityPrompt").ObjectText = Ore.Name .. "("..NewHealth.."/"..MaxHealth..")"
 	end
 	Ore:SetAttribute("OreHealth", NewHealth)
 	Ore:SetAttribute("LastMined", workspace:GetServerTimeNow())
@@ -381,23 +432,21 @@ local function AttemptToSpawnOre()
 	local OreName = RandomOre.."Ore"
 	local OreTemplate = OreTemplates:FindFirstChild(OreName)
 	if not OreTemplate then 
-		warn("There is no Ore named '".. OreName .."' found in OreTemplates!")
-		warn("Please add your model for this ore in OreTemplates folder.")
+		Debug_Print("Warn","There is no Ore named '".. OreName .."' found in OreTemplates! \nPlease add your model for this ore in OreTemplates folder.", {OreName = OreName})
 		return
 	end
 	local Ore:Model = OreTemplate:Clone()
 	Ore.Parent = workspace
 	local PrimaryPart = Ore.PrimaryPart
 	if not PrimaryPart then
-		warn("Ore model '".. OreName .."' has no set PrimaryPart")
-		warn("Please set a PrimaryPart for your Ore model(s).")
+		Debug_Print("Warn","Ore model '".. OreName .."' has no set PrimaryPart \nPlease set a PrimaryPart for your Ore model(s).", {OreName = OreName})
 		return
 	end
 	local OreID = RegisterOre(Ore)
 	local SpawnSlot = World:GetRandomSpawnSlot(OreID)
 	if not SpawnSlot then 
-		warn("No avaliable spawn locations!")
-		warn("Consider increasing the number of spawn locations or decreasing the number of maximum spawnable ores in settings.")
+		Debug_Print("Warn","No available spawn locations!")
+		Debug_Print("Warn","Consider increasing the number of spawn locations or decreasing the number of maximum spawnable ores in settings.")
 		return
 	end
 	local BaseCFrame = SpawnSlot.SpawnLocation.CFrame
@@ -406,41 +455,43 @@ local function AttemptToSpawnOre()
 	Ore:PivotTo(
 		BaseCFrame * CFrame.Angles(0, RandomAngle, 0)
 	)
-
-	Ore:SetAttribute("OreHealth", OreData_ForOre.Health) -- Health is stored as an attribute to allow easy debugging and future UI integration
+	local Ore_Health = OreData_ForOre.Health
+	Ore:SetAttribute("OreHealth", Ore_Health) -- Health and MaxHealth are stored as an attribute to allow easy debugging and future UI integration
+	Ore:SetAttribute("OreMaxHealth", Ore_Health)
 
 	local Prompt = Instance.new("ProximityPrompt")
 	Prompt.Parent = PrimaryPart
 	Prompt.ActionText = "Mine"
-	Prompt.ObjectText = OreName
+	Prompt.ObjectText = OreName .. "("..Ore_Health.."/"..Ore_Health..")"
 	Prompt.RequiresLineOfSight = false
 	Prompt.HoldDuration = 0
 	Prompt.MaxActivationDistance = Settings.MaxDistanceToOre
 	Prompt.Triggered:Connect(function(Player)
 		--// Check if player has a pickaxe equipped
 		local EquippedTool = Player.Character:FindFirstChildOfClass("Tool")
-		-- Checks intentionally fails silently to avoid revealing internal validation logic to exploiters
+		-- Checks intentionally fail silently to avoid revealing internal validation logic to exploiters
 		if not EquippedTool then return end
 		if EquippedTool.Name:split(" ")[2] ~= "Pickaxe" then return end
 
 		if Ore:GetAttribute("Owner") then --// Check if ore is already 'claimed'
-			if Ore:GetAttribute("Owner") ~= Player.UserId then
-				print("Cannot mine this ore, owner is '".. Ore:GetAttribute("Owner") .."'")
-				return
-			end
+			if Ore:GetAttribute("Owner") ~= Player.UserId then return end
 		end
 		Ore:SetAttribute("Owner",  Player.UserId) --// claim ownership
 
 		local Data = PickaxesData[EquippedTool.Name]
 		if not Data then 
-			warn("No pickaxe data found in 'PickaxesData' for pickaxe '".. EquippedTool.Name .."'!")
-			warn("Consider adding data for this pickaxe or remove it.")
+			Debug_Print("Warn","No pickaxe data found in 'PickaxesData' for pickaxe '".. EquippedTool.Name .."'!\nConsider adding data for this pickaxe or remove it.")
 			return 
 		end
-		if not CooldownManager:CanMine(Player) then return end
+		if not CooldownManager:CanMine(Player) then 
+			return
+		end
 
-		if Data.Tier < OreData_ForOre.MinRequiredTier then return end
-		Prompt.Enabled = false
+		if Data.Tier < OreData_ForOre.MinRequiredTier then
+			Debug_Print('Debug','Your pickaxe is too weak to mine this ore', {["Player"] = Player, ['PickaxeTier'] = Data.Tier, ['OreTier'] = OreData_ForOre.MinRequiredTier})
+			return 
+		end
+		Prompt.Enabled = false -- Prompt is disabled globally to avoid state conflicts on the same ore
 		task.delay(Data.Cooldown, function()
 			Prompt.Enabled = true
 		end)
