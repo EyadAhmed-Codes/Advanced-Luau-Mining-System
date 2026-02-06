@@ -89,7 +89,7 @@ local PickaxesData = {
 ------ Debug and info -------
 -----------------------------
 local LOG_LEVEL = {
-	Debug = true,  --// set false if in production
+	Debug = false,  --// set false if in production
 	Info = true,
 	Security = true,
 	Warn = true,
@@ -126,7 +126,6 @@ end
 -----------------------------
 local LeaderboardValues = {
 	Cash = {DefaultValue = 0, Type = "IntValue"},
-
 }
 Players.PlayerAdded:Connect(function(player)
 	local leaderstats = Instance.new("Folder")
@@ -160,11 +159,13 @@ function CooldownManager:CanMine(Player)
 	if not self.Players[Player] then
 		return true
 	end
-	return now >= self.Players[Player]
+	return now >= self.Players[Player] -- Comparing absolute timestamps avoids edge cases where cooldowns
+									   -- could be bypassed if the server lags or frame timing fluctuates
 end
 
 function CooldownManager:StartCooldown(Player, Cooldown)
-	self.Players[Player] = workspace:GetServerTimeNow() + Cooldown
+	self.Players[Player] = workspace:GetServerTimeNow() + Cooldown -- Store absolute timestamp instead of remaining time
+																   -- This avoids drift and allows O(1) cooldown validation
 end
 
 Players.PlayerRemoving:Connect(function(Player) -- Cooldown data is cleared on PlayerRemoving to prevent memory leaks
@@ -191,7 +192,8 @@ function OreState:AddOre(Ore:Model)
 	return OreID
 end
 
-function OreState:RemoveOre(OreID)
+function OreState:RemoveOre(OreID) -- Removing both the counter and ID entry keeps OreState consistent,
+								   -- preventing desync between actual instances and tracked state
 	OreState.SpawnedOres -= 1
 	OreState.ByID[OreID] = nil
 end
@@ -205,7 +207,8 @@ local World = {
 }
 --// Get A Random Spawn Location (For OreID)
 --// OreID: number
-function World:GetRandomSpawnSlot(OreID)
+function World:GetRandomSpawnSlot(OreID) -- Random index selection ensures uniform distribution
+										 -- while keeping slot allocation O(1)
 	local Index = math.random(1, #World.AvailableSlots)
 	local ChosenSlot = World.AvailableSlots[Index]
 	if ChosenSlot then
@@ -220,8 +223,10 @@ function World:RemoveFromSlot(OreID) -- Spawn slot is freed to prevent dead slot
 	for Index, Slot in pairs(World.TakenSlots) do
 		if Slot.SpawnedOre == OreID then
 			Slot.SpawnedOre = nil
-			table.insert(World.AvailableSlots, Slot) --// Add the slot to available slots
-			table.remove(World.TakenSlots, Index) --// Remove the slot from taken slots
+			-- Return slot back to AvailableSlots so future ores
+			-- can reuse this location without overlapping
+			table.insert(World.AvailableSlots, Slot)
+			table.remove(World.TakenSlots, Index)
 			return
 		end
 	end
@@ -238,11 +243,15 @@ local function DeleteOre(OreID, Order:boolean)
 	local Ore = OreState.ByID[OreID]
 	if Ore then
 		local LastMined = Ore:GetAttribute("LastMined")
-		if not Order and LastMined then
+		if not Order and LastMined then -- Prevent ores from despawning while actively being mined
+										-- unless an explicit deletion order is issued.
+										-- This avoids resetting the despawn timer on every hit
+										-- while still allowing active mining to block deletion.
 			local TimeSinceLastMined = workspace:GetServerTimeNow() - LastMined
 			if TimeSinceLastMined < Settings.OreDespawnTime then
-				task.delay(Settings.OreDespawnTime, function()
-					DeleteOre(OreID, false)
+				task.delay(Settings.OreDespawnTime, function()	-- Recursive delayed check ensures ores only despawn
+																-- after being inactive for the full despawn duration
+					DeleteOre(OreID, false)                     
 				end)
 				return
 			end
@@ -257,7 +266,8 @@ end
 --// Ore: Model
 local function RegisterOre(Ore:Model)
 	local OreID = OreState:AddOre(Ore)
-	Ore:SetAttribute("LastMined", workspace:GetServerTimeNow())
+	Ore:SetAttribute("LastMined", workspace:GetServerTimeNow())   -- Initialize LastMined immediately so newly spawned ores
+																  -- participate correctly in despawn timing logic
 	task.delay(Settings.OreDespawnTime, function()
 		DeleteOre(OreID, false)
 	end)
@@ -340,10 +350,12 @@ local function DropOres(Player:Player, Ore:Model)
 	
 	for i = 1, Data_ForOre.DropAmount do
 		local DropOre_Clone = OreDropTemplate:Clone()
-		local Position = Ore.PrimaryPart.Position + Vector3.new(math.random(2,5), math.random(2,5), math.random(2,5))
+		-- Small random offset prevents stacked drops which could
+		-- cause physics jitter or make individual pickups unreadable
+		local Position = Ore.PrimaryPart.Position + Vector3.new(math.random(2,5), math.random(2,5), math.random(2,5)) 
 		DropOre_Clone.Parent = workspace
-		DropOre_Clone.root.CanCollide = true
-		DropOre_Clone.root.Anchored = false
+		DropOre_Clone.root.CanCollide = true -- Enable physics interaction so dropped ores behave
+		DropOre_Clone.root.Anchored = false  -- like real world items and are visually readable
 		DropOre_Clone:PivotTo(CFrame.new(Position))
 		
 		DropOre_Clone:SetAttribute("Owner", Player.UserId)
@@ -361,15 +373,16 @@ local function DropOres(Player:Player, Ore:Model)
 		
 		pp.Triggered:Connect(function(Player)
 			if DropOre_Clone:GetAttribute("PickedUp") then return end
-			if DropOre_Clone:GetAttribute("Owner") ~= Player.UserId then return end -- make sure player owns the ore
-
+			if DropOre_Clone:GetAttribute("Owner") ~= Player.UserId then return end -- Ownership validation prevents other players from
+			    																	-- stealing drops via prompt spoofing or lag abuse
 			if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then
 				Debug_Print("Debug", "Player has no character or humanoid root part", {UserId = Player.UserId})
 				return 
 			end
 			-- Distance is rechecked server-side to prevent exploiters from triggering prompts remotely
 			local Distance = (Player.Character.HumanoidRootPart.Position - DropOre_Clone.root.Position).Magnitude
-			if Distance > Settings.MaxPickupDistance + 2 then
+			if Distance > Settings.MaxPickupDistance + 2 then -- Small buffer accounts for character movement and latency
+															  -- without meaningfully expanding the allowed pickup range
 				Debug_Print("Security", "Player is too far from prompt", {UserId = Player.UserId, DistanceFromOre = Distance})
 				return
 			end
@@ -380,7 +393,8 @@ local function DropOres(Player:Player, Ore:Model)
 			OreTool:Clone().Parent = Player.Backpack
 		end)
 		
-		Debris:AddItem(DropOre_Clone, Settings.OreDropsDespawnTime)
+		Debris:AddItem(DropOre_Clone, Settings.OreDropsDespawnTime) -- Debris is used instead of manual cleanup to guarantee
+																	-- removal even if references are lost or script errors
 	end
 end
 
@@ -404,7 +418,8 @@ local function MineOre(Player:Player, OreID:number, PickaxeData)
 	end
 	local Health = Ore:GetAttribute("OreHealth")
 	local MaxHealth = Ore:GetAttribute("OreMaxHealth")
-	local NewHealth = math.max(0, Health - PickaxeData.Damage)
+	local NewHealth = math.max(0, Health - PickaxeData.Damage) -- Clamp health to zero to avoid negative values,
+															   -- which would break UI and despawn logic
 	if NewHealth == 0 then
 		if Player:FindFirstChild("leaderstats") and Player.leaderstats:FindFirstChild("Cash") then --Make sure leaderstats and cash exists
 			Player.leaderstats.Cash.Value += OreData[Ore.Name:split("Ore")[1]].CashReward
@@ -418,7 +433,8 @@ local function MineOre(Player:Player, OreID:number, PickaxeData)
 		Ore.Root:FindFirstChild("ProximityPrompt").ObjectText = Ore.Name .. "("..NewHealth.."/"..MaxHealth..")"
 	end
 	Ore:SetAttribute("OreHealth", NewHealth)
-	Ore:SetAttribute("LastMined", workspace:GetServerTimeNow())
+	Ore:SetAttribute("LastMined", workspace:GetServerTimeNow()) -- Update activity timestamp so the ore is not
+																-- despawned while actively being mined
 end
 --// Attempt to spawn an ore
 local function AttemptToSpawnOre()
@@ -491,7 +507,7 @@ local function AttemptToSpawnOre()
 			Debug_Print('Debug','Your pickaxe is too weak to mine this ore', {["Player"] = Player, ['PickaxeTier'] = Data.Tier, ['OreTier'] = OreData_ForOre.MinRequiredTier})
 			return 
 		end
-		Prompt.Enabled = false -- Prompt is disabled globally to avoid state conflicts on the same ore
+		Prompt.Enabled = false -- Disable prompt globally to prevent concurrent triggered events from corrupting ore state
 		task.delay(Data.Cooldown, function()
 			Prompt.Enabled = true
 		end)
@@ -503,8 +519,8 @@ end
 
 task.spawn(function()
 	while true do
-		task.wait(Settings.SpawnOreCooldown)
-
+		task.wait(Settings.SpawnOreCooldown) 
+			
 		if OreState.SpawnedOres >= Settings.MaxOres then --// Max ores spawned?
 			continue       --// skip spawning a new ore
 		end
