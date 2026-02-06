@@ -1,11 +1,11 @@
 --------------------------------------------| Notes |-------------------------------------------
---|         > Core mining system scripted entirely by Eyad Ahmed (@eyado2122_1 on roblox)
---|         > This script intentionally avoids ModuleScripts to keep all related mining 
---|            logic auditable in one place (for application).
---|         - Pickaxe name is expected to be "Iron Pickaxe", "Gold Pickaxe", etc..
---|		    - Ore model name is expected to be "IronOre", "GoldOre", etc..
---|		    - Ore Drops must be a model and has 1 part/mesh named 'root'.
---|		    - No animations are implemented here because a client script would be needed.
+--|         > Core mining system scripted entirely by Eyad Ahmed (@eyado2122_1 on roblox)    |--
+--|         > This script intentionally avoids ModuleScripts to keep all related mining      |--
+--|            logic auditable in one place (for application).                               |--
+--|         - Pickaxe name is expected to be "Iron Pickaxe", "Gold Pickaxe", etc..           |--
+--|		    - Ore model name is expected to be "IronOre", "GoldOre", etc..                   |--
+--|		    - Ore Drops must be a model and has 1 part/mesh named 'root'.                    |--
+--|		    - No animations are implemented here because a client script would be needed.    |--
 ------------------------------------------------------------------------------------------------
 --// Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -492,7 +492,9 @@ local function AttemptToSpawnOre()
 		if Ore:GetAttribute("Owner") then --// Check if ore is already 'claimed'
 			if Ore:GetAttribute("Owner") ~= Player.UserId then return end
 		end
-		Ore:SetAttribute("Owner",  Player.UserId) --// claim ownership
+		Ore:SetAttribute("Owner",  Player.UserId)
+		-- Ownership is locked to the first miner to prevent multi-player race conditions
+		-- and reward duplication when multiple prompts trigger simultaneously
 
 		local Data = PickaxesData[EquippedTool.Name]
 		if not Data then 
@@ -520,7 +522,9 @@ end
 task.spawn(function()
 	while true do
 		task.wait(Settings.SpawnOreCooldown) 
-			
+
+		-- SpawnedOres acts as a global cap to prevent uncontrolled ore growth,
+		-- which protects both server performance and spawn slot consistency
 		if OreState.SpawnedOres >= Settings.MaxOres then --// Max ores spawned?
 			continue       --// skip spawning a new ore
 		end
