@@ -1,11 +1,27 @@
 --------------------------------------------| Notes |-------------------------------------------
---|         > Core mining system scripted entirely by Eyad Ahmed (@eyado2122_1 on roblox)    |--
---|         > This script intentionally avoids ModuleScripts to keep all related mining      |--
---|            logic auditable in one place (for application).                               |--
---|         - Pickaxe name is expected to be "Iron Pickaxe", "Gold Pickaxe", etc..           |--
---|		    - Ore model name is expected to be "IronOre", "GoldOre", etc..                   |--
---|		    - Ore Drops must be a model and has 1 part/mesh named 'root'.                    |--
---|		    - No animations are implemented here because a client script would be needed.    |--
+--|         > Core mining system scripted entirely by Eyad Ahmed (@eyado2122_1 on roblox)    
+--|         > This script intentionally avoids ModuleScripts to keep all related mining      
+--|            logic auditable in one place (for application).                               
+--|         - Pickaxe name is expected to be "Iron Pickaxe", "Gold Pickaxe", etc..           
+--|		    - Ore model name is expected to be "IronOre", "GoldOre", etc..                   
+--|		    - Ore Drops must be a model and has 1 part/mesh named 'root'.                    
+--|		    - No animations are implemented here because a client script would be needed.    
+--|         -This mining system is fully server-authoritative.
+--|    -Design Goals:
+--|         - Prevent remote abuse and prompt spoofing
+--|         - Avoid race conditions during mining
+--|         - Maintain O(1) cooldown validation
+--|         - Avoid unnecessary replication
+--|         - Centralize ore state outside Instances
+--|         - Guarantee cleanup even under failure cases
+--|    
+--|    -Architecture:
+--|         - OreState: Tracks all active ores using sequential IDs
+--|         - World: Manages spawn slot allocation
+--|         - CooldownManager: Uses absolute timestamps to prevent drift
+--|         - Attributes: Used for debug visibility and future UI integration
+--|    
+--|    -All validation is server-side.
 ------------------------------------------------------------------------------------------------
 --// Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -23,7 +39,9 @@ local OresTools_Folder = ServerAssets:WaitForChild("OresTools") --// Folder to s
 
 --// Tables
 local OresByRarity = {}
-
+-- Settings are centralized here to make system balancing adjustable
+-- without touching core mining logic. This prevents variables
+-- from being scattered across the script.
 local Settings = {
 	SpawnOreCooldown = 3      -- Spawn Ore every ... seconds
 	,MaxDistanceToOre = 10    -- Maximum distance that the ore can be from the player to be mined (ProximityPrompt range and distance checks)
@@ -42,7 +60,9 @@ local RarityChances = {    --// Chance of each rarity to spawn
 	Rare = 4,
 	VeryRare = 1,
 }
-
+-- OreData acts as a single source of truth for all ore balancing. No gameplay values are 
+-- hardcoded outside this table.
+-- This makes adding new ores scale without changing system logic.
 local OreData = {
 	["Copper"] = {
 		Health = 50              -- Health of the ore
@@ -98,7 +118,7 @@ local LOG_LEVEL = {
 
 --// Debug / Logging Utility
 local function Debug_Print(Level:"Debug" | "Info" | "Security" | "Warn" | "Error", Message:string, Context)
-	if not LOG_LEVEL[Level] then
+	if not LOG_LEVEL[Level] then -- Check in LOG_LEVEL if logs should be shown or not
 		return
 	end
 
@@ -156,8 +176,8 @@ local CooldownManager = {
 -- Server time is used instead of tick() to prevent desync issues caused by lag or client-side time differences
 function CooldownManager:CanMine(Player)
 	local now = workspace:GetServerTimeNow() 
-	if not self.Players[Player] then
-		return true
+	if not self.Players[Player] then   -- First time player using CooldownManager:CanMine, so
+		return true                    -- return true (can mine)
 	end
 	return now >= self.Players[Player] -- Comparing absolute timestamps avoids edge cases where cooldowns
 									   -- could be bypassed if the server lags or frame timing fluctuates
@@ -176,7 +196,8 @@ end)
 
 -----------------------------
 --------- Ore State --------- -- Centralized state table used instead of Instances to avoid unnecessary replication and improve server-side control
------------------------------
+----------------------------- -- OreState is intentionally separate from Instances. This avoids relying on workspace traversal
+							  -- and allows constant-time ore lookup by ID.
 local OreState = { -- Ore IDs are generated sequentially to guarantee uniqueness without relying on Instance:GetDebugId()
 	ByID = {} -- [OreID] -> Ore
 	,NextID = 0
@@ -199,8 +220,9 @@ function OreState:RemoveOre(OreID) -- Removing both the counter and ID entry kee
 end
 
 -----------------------------
--------- World Data ---------
------------------------------
+-------- World Data ---------	-- World handles spatial spawn allocation.
+-----------------------------	-- Separation from OreState prevents logical coupling
+								-- between instance tracking and spawn management.
 local World = {
 	AvailableSlots = {} --// List of spawn available locations for ores  (dynamic)
 	,TakenSlots = {}    --// List of taken spawn locations for ores (dynamic)
@@ -220,7 +242,7 @@ function World:GetRandomSpawnSlot(OreID) -- Random index selection ensures unifo
 end
 
 function World:RemoveFromSlot(OreID) -- Spawn slot is freed to prevent dead slots after ore removal
-	for Index, Slot in pairs(World.TakenSlots) do
+	for Index, Slot in pairs(World.TakenSlots) do -- search for slot with OreID
 		if Slot.SpawnedOre == OreID then
 			Slot.SpawnedOre = nil
 			-- Return slot back to AvailableSlots so future ores
@@ -239,7 +261,9 @@ end
 --// OreID: number
 --// Order: boolean. Default: false. (if true, it will delete the ore, if false, will check for TimeSinceLastMined.
 --// true should be used when you want to delete the ore, and false should be used for despawning logic)
-local function DeleteOre(OreID, Order:boolean)
+local function DeleteOre(OreID, Order:boolean)	-- DeleteOre centralizes all cleanup logic.
+												-- No ore is destroyed directly outside this function,
+												-- ensuring slot state and OreState remain consistent.
 	local Ore = OreState.ByID[OreID]
 	if Ore then
 		local LastMined = Ore:GetAttribute("LastMined")
@@ -287,6 +311,11 @@ local function GetRandomRarity() -- Weighted random selection ensures rarer ores
 	return "VeryCommon"
 end
 ------------------------------------| Game Initialization |------------------------------------
+-- Init performs one-time system bootstrapping:
+-- - Builds rarity lookup table
+-- - Registers spawn slots
+-- - Generates dynamic ore tools
+-- - Sanitizes spawn location visibility
 local function Init()
 	--// Init OreRarityTable
 	local OreRarityTable = OresByRarity
@@ -303,6 +332,8 @@ local function Init()
 	end
 	
 	--// Make Tools for ore
+	-- Tools are generated dynamically from drop templates
+	-- to prevent manual duplication and reduce maintenance overhead.
 	for _, Ore in pairs(OreDropTemplates:GetChildren()) do
 		local OreClone = Ore:Clone()
 		local OreTool = Instance.new("Tool")
@@ -336,11 +367,11 @@ if not Success then
 	Debug_Print("Error","Initialization Failed!", {ErrorMessage = ErrorMsg})
 end
 -----------------------------------------------------------------------------------------------
-
 --// Drop ores at the ore's position
 --// Player: Player that will own the ores
 --// Ore: Ore model
-local function DropOres(Player:Player, Ore:Model)
+local function DropOres(Player:Player, Ore:Model) -- DropOres is called only after successful ore destruction.
+												  -- Ownership is embedded into drops to prevent multiplayer exploitation.
 	local Data_ForOre = OreData[Ore.Name:split("Ore")[1]]
 	local OreDropTemplate = OreDropTemplates[Ore.Name]
 	if not OreDropTemplate then 
@@ -371,7 +402,8 @@ local function DropOres(Player:Player, Ore:Model)
 		pp.KeyboardKeyCode = Enum.KeyCode.F
 		pp.MaxActivationDistance = Settings.MaxPickupDistance
 		
-		pp.Triggered:Connect(function(Player)
+		pp.Triggered:Connect(function(Player) -- Prompt validation is fully server-side. Even if client triggers the prompt remotely,
+										      -- distance and ownership are validated.
 			if DropOre_Clone:GetAttribute("PickedUp") then return end
 			if DropOre_Clone:GetAttribute("Owner") ~= Player.UserId then return end -- Ownership validation prevents other players from
 			    																	-- stealing drops via prompt spoofing or lag abuse
@@ -403,7 +435,9 @@ end
 --// Player: Player mining the ore
 --// OreID: number
 --// PickaxeData: table
-local function MineOre(Player:Player, OreID:number, PickaxeData) 
+local function MineOre(Player:Player, OreID:number, PickaxeData) -- MineOre contains all mining validation logic.
+																 -- This prevents mining behavior from being duplicated
+																 -- across multiple event connections.
 	local Ore:Model = OreState.ByID[OreID]
 	if not Ore then return end
 	if not Player.Character or not Player.Character:FindFirstChild("HumanoidRootPart") then 
@@ -437,7 +471,9 @@ local function MineOre(Player:Player, OreID:number, PickaxeData)
 																-- despawned while actively being mined
 end
 --// Attempt to spawn an ore
-local function AttemptToSpawnOre()
+local function AttemptToSpawnOre() -- AttemptToSpawnOre is intentionally isolated
+								   -- to keep spawning logic separate from mining logic.
+								   -- This improves readability and maintainability.
 	local RandomRarity = GetRandomRarity()
 	local OreRarityTable = OresByRarity
 	local OresList = OreRarityTable[RandomRarity]
