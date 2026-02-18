@@ -6,7 +6,6 @@
 --|		    - Ore model name is expected to be "IronOre", "GoldOre", etc..                   
 --|		    - Ore Drops must be a model and has 1 part/mesh named 'root'.                    
 --|		    - No animations are implemented here because a client script would be needed.    
---|         -This mining system is fully server-authoritative.
 --|    -Design Goals:
 --|         - Prevent remote abuse and prompt spoofing
 --|         - Avoid race conditions during mining
@@ -21,7 +20,15 @@
 --|         - CooldownManager: Uses absolute timestamps to prevent drift
 --|         - Attributes: Used for debug visibility and future UI integration
 --|    
---|    -All validation is server-side.
+--|    -Modules:
+--|    		- Validation Layer
+--|    		- Ore State Management
+--|   		- Cooldown System
+--|   		- Spawn Allocation
+--|   		- Rarity Distribution
+--|   		- Cleanup Pipeline
+--|    
+--|   	-All validation is server-side.
 ------------------------------------------------------------------------------------------------
 --// Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
